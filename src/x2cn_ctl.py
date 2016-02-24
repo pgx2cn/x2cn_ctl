@@ -16,21 +16,32 @@ g_lxc = {}
 g_coord_conf_dict = {}
 g_datanode_conf_dict = {}
 
-# 下面的全局变量，只是示例，便于查看，真正的会在load_config()函数中重新初使化
+# 下面的全局变量，内容只是示例，便于查看，真正的会在load_config()函数中重新初使化
 
 g_ip_prefix = '10.0.3'
 g_pgx2_user = 'pg'
 
+# g_host_list中汇总了每台机器上有哪些操作系统用户，主要为了后面的在每台机器上加用户的操作
 g_host_list = [
     {
         'hostame': 'dn01',
         'ip': '10.0.3.11',
-        'os_user_list': {701: 'gtm', 702: 'gtm_standby'}
+        'os_user_list': {701: 'gtm', 702: 'gtm_standby'},
+        'have_gtm': 0,
+        'have_gtm_standby': 0,
+        'have_gtm_proxy': 0,
+        'have_coordinator': 1,
+        'have_datanode': 1
     },
     {
         'hostame': 'dn02',
         'ip': '10.0.3.12',
-        'os_user_list': {701: 'gtm', 702: 'gtm_standby'}
+        'os_user_list': {701: 'gtm', 702: 'gtm_standby'},
+        'have_gtm': 0,
+        'have_gtm_standby': 0,
+        'have_gtm_proxy': 0,
+        'have_coordinator': 1,
+        'have_datanode': 1
     },
 ]
 
@@ -236,17 +247,17 @@ def load_config():
     # 遍历配置文件中各台主机中的配置
     sections = config.sections()
     for section in sections:
-        # 跳过全局配置，只扫描各台主机的配置
+        # 跳过全局配置的section，只扫描各台主机的配置
         if section in global_sections:
             continue
         hostname = config.get(section, 'hostname')
         ip = config.get(section, 'ip')
-        port_dict = {
+        host_info_dict = {
             'hostname': hostname,
             'ip': ip
         }
 
-        g_host_list.append(port_dict)
+        g_host_list.append(host_info_dict)
 
         # 处理gtm,gtm_standby,gtm_proxy, coordinator,datanode的配置项
         #   配置项如“coordinator_nodename”这些都是由node_type（“coordinator”）和key（“nodename”）组合而成
@@ -260,13 +271,13 @@ def load_config():
         for node_type in node_type_list:
             have_key = 'have_%s' % node_type
             if config.has_option(section, have_key):
-                port_dict[have_key] = config.getint(section, have_key)
+                host_info_dict[have_key] = config.getint(section, have_key)
             else:
-                port_dict[have_key] = 0
+                host_info_dict[have_key] = 0
 
             gvar = node_gvar_dict[node_type]
 
-            if port_dict[have_key]:
+            if host_info_dict[have_key]:
                 if node_type in multi_item_node_type_list:
                     # item_list存储某个类别(gtm_proxy,coordinator, datanode)的配置项，而每个配置项又是一个数组
                     #   数组表明这台机器上安装了这个类别的多个实例
@@ -322,7 +333,7 @@ def load_config():
         # 后面会检查配置项，如果发现不正确的配置项，则设置为True
         invalid_config = False
 
-        # 汇总每台机器上的操作用户到g_host_list中
+        # 汇总每台机器上的操作系统用户到g_host_list中
         # 先生成一个字典，通过主机名hostname就能映射到g_host_list数组中第几项
         hostname2index = {}
         cnt = len(g_host_list)
@@ -369,14 +380,14 @@ def load_config():
                         invalid_config = True
 
         # 检查同一台机器上，不同的os_uid的用户名是否有相同的：
-        for port_dict in g_host_list:
+        for host_info_dict in g_host_list:
             user2uid = {}
-            os_user_list = port_dict['os_user_list']
+            os_user_list = host_info_dict['os_user_list']
             for uid in os_user_list:
                 os_user = os_user_list[uid]
                 if os_user in user2uid:
                     sys.stderr.write("In host(%s), same user name (%s) but different uid(%s, %s)\n" %
-                                     (port_dict['hostname'], os_user, uid, user2uid[os_user]))
+                                     (host_info_dict['hostname'], os_user, uid, user2uid[os_user]))
                     invalid_config = True
                 else:
                     user2uid[os_user] = uid
@@ -882,6 +893,10 @@ def stop_lxc_all():
 
 
 def initdb(is_datanode, nodename, node_ip, os_user, port, pooler_port, pgdata):
+    global g_pgx2_user
+    global g_gtm
+    global g_gtm_proxy
+
     # 如果PGDATA目录不存在，则建上
     cmd = "if [ ! -d '{pgdata:s}' ] ; then /bin/mkdir -p {pgdata:s};" \
           "/bin/chown {user:s}:{group:s} {pgdata:s};" \
@@ -890,23 +905,32 @@ def initdb(is_datanode, nodename, node_ip, os_user, port, pooler_port, pgdata):
     ssh_cmd = '''ssh %s "%s"''' % (node_ip, cmd)
     run_cmd(ssh_cmd)
 
-    cmd = '''su - %s -c 'initdb --nodename=%s --auth-host=md5 -U pg -D %s' ''' % (os_user, nodename, pgdata)
+    cmd = '''su - %s -c 'initdb --nodename=%s --auth-host=md5 -U %s -D %s' ''' % (
+        os_user, nodename, g_pgx2_user, pgdata)
     ssh_cmd = '''ssh %s "%s"''' % (node_ip, cmd)
     run_cmd(ssh_cmd)
     config_file = "%s/postgresql.conf" % pgdata
 
     gtm_ip = g_gtm['ip']
+    gtm_port = g_gtm['port']
 
     if is_datanode:
         modify_item_dict = dict(g_datanode_conf_dict)
     else:
         modify_item_dict = dict(g_coord_conf_dict)
 
+    # 如果此节点上有gtm proxy，则所此节点的gtm的地址改为127.0.0.1，而port改成gtm_proxy的port，否则直接连接gtm
+    for gtm_proxy_node in g_gtm_proxy:
+        if gtm_proxy_node['ip'] == node_ip:
+            gtm_port = gtm_proxy_node['port']
+            gtm_ip = '127.0.0.1'
+            break
+
     modify_item_dict.update({
         "port": "%d" % port,
         "pooler_port": "%d" % pooler_port,
         "gtm_host": "'%s'" % gtm_ip,
-        "gtm_port": "%d" % g_gtm['port']
+        "gtm_port": "%d" % gtm_port
     })
     modify_remote_pg_conf(node_ip, config_file, modify_item_dict)
 
@@ -1746,13 +1770,12 @@ def action_get():
 
 
 def action_check_config():
-
     sys.stdout.write("Check OK.\n")
 
 
 def main():
     cmd_def_list = [
-        [action_check_config, 'check_config', 'add a lxc virtual machine.'],
+        [action_check_config, 'check_config', 'check configuration.'],
         [action_lxc_add, 'lxc_add', 'add a lxc virtual machine.'],
         [action_lxc_del, 'lxc_del', 'delete a lxc virtual machine by name.'],
         [action_lxc_add_all, 'lxc_add_all', 'add all lxc virtual machine.'],
