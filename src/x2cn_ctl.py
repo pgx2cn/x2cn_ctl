@@ -1299,62 +1299,198 @@ def stop_pgx2():
         run_cmd(ssh_cmd)
 
 
+def get_pgx2_node_status(ip, comm, pidfile):
+    """
+    获得某一个pgx2的节点的状态
+    :return:
+    """
+
+    cmd = "test -f %s && head -1 %s" % (pidfile, pidfile)
+    ssh_cmd = '''ssh -o BatchMode=yes -t %s "%s"''' % (ip, cmd)
+    err_code, err_msg, out_msg = run_cmd_result(ssh_cmd)
+    if err_code == 1:
+        return "Stopped"
+    elif err_code != 0:  # 无法ssh上去
+        return "Unknown"
+
+    pid = out_msg.strip()
+
+    cmd = 'cat /proc/%s/comm && kill -0 %s' % (pid, pid)
+    ssh_cmd = '''ssh -o BatchMode=yes -t %s "%s"''' % (ip, cmd)
+    err_code, err_msg, out_msg = run_cmd_result(ssh_cmd)
+    if err_code:
+        return "Stopped"
+
+    if out_msg.strip() != comm:
+        return "Stopped"
+
+    return "Running(pid=%s)" % pid
+
+
 def status_pgx2():
-    # gtm
-    logger.info("GTM status ...")
-    node_ip = g_gtm['ip']
-    os_user = g_gtm['os_user']
-    pgdata = g_gtm['pgdata']
-    cmd = "su - %s -c 'gtm_ctl status -Z gtm -D %s' " % (os_user, pgdata)
-    ssh_cmd = '''ssh -o BatchMode=yes -t %s "%s"''' % (node_ip, cmd)
-    run_cmd(ssh_cmd)
+    """
+    显示各个节点的状态
+    :return:
+    """
+    global g_host_list
 
-    if g_gtm_standby:
-        logger.info("GTM Standby status...")
-        node_ip = g_gtm_standby['ip']
-        os_user = g_gtm_standby['os_user']
-        pgdata = g_gtm_standby['pgdata']
-        cmd = "su - %s -c 'gtm_ctl status -Z gtm_standby -D %s' " % (os_user, pgdata)
-        ssh_cmd = '''ssh -o BatchMode=yes -t %s "%s"''' % (node_ip, cmd)
-        run_cmd(ssh_cmd)
+    # 定义要打印的每一列的标题、长度及其对齐的方向
+    prt_item_list = [['hostname',           10, '-'],
+                     ['ip',                  9,  ''],
+                     ['nodetype',           11, '-'],
+                     ['nodename',           12, '-'],
+                     ['port',                5,  ''],
+                     ['status',             20, '-']
+                     ]
 
-    # gtm_proxy
-    cnt = len(g_gtm_proxy)
-    for i in range(cnt):
-        nodename = g_gtm_proxy[i]['nodename']
-        node_ip = g_gtm_proxy[i]['ip']
-        os_user = g_gtm_proxy[i]['os_user']
-        pgdata = g_gtm_proxy[i]['pgdata']
+    title1 = '  '.join([i[0].center(i[1]) for i in prt_item_list])
+    title2 = '  '.join('-'*i[1] for i in prt_item_list)
+    format_str = '  '.join('%' + str(i[2]) + str(i[1]) + 's' for i in prt_item_list)
+    # 打印标题
+    print title1
+    print title2
 
-        logger.info("GTM Proxy(%s) status..." % nodename)
-        cmd = "su - %s -c 'gtm_ctl status -Z gtm_proxy -D %s' " % (os_user, pgdata)
-        ssh_cmd = '''ssh -o BatchMode=yes -t %s "%s"''' % (node_ip, cmd)
-        run_cmd(ssh_cmd)
+    for host_dict in g_host_list:
+        # print "===== %s(%s) =====" % (host_dict['hostname'], host_dict['ip'])
+        hostname = host_dict['hostname']
+        prt_hostname = hostname
+        ip = host_dict['ip']
+        prt_ip = ip
+        if host_dict['have_gtm']:
+            node_dict = g_gtm
+            pgdata = node_dict['pgdata']
+            pidfile = '%s/gtm.pid' % pgdata
+            node_status = get_pgx2_node_status(host_dict['ip'], 'gtm', pidfile)
+            print format_str % (
+                prt_hostname, prt_ip, 'gtm', node_dict['nodename'],
+                node_dict['port'], node_status)
+            prt_hostname = ''
+            prt_ip = ''
 
-    cnt = len(g_datanode)
-    for i in range(cnt):
-        nodename = g_datanode[i]['nodename']
-        node_ip = g_datanode[i]['ip']
-        os_user = g_datanode[i]['os_user']
-        pgdata = g_datanode[i]['pgdata']
+        if host_dict['have_gtm_standby']:
+            node_dict = g_gtm_standby
+            pgdata = node_dict['pgdata']
+            pidfile = '%s/gtm.pid' % pgdata
+            node_status = get_pgx2_node_status(host_dict['ip'], 'gtm', pidfile)
+            print format_str % (
+                prt_hostname, prt_ip, 'gtm_standby', node_dict['nodename'],
+                node_dict['port'], node_status)
+            prt_hostname = ''
+            prt_ip = ''
 
-        logger.info("Datanode(%s) status ..." % nodename)
-        cmd = "su - %s -c 'pg_ctl status -Z datanode -D %s'" % (os_user, pgdata)
-        ssh_cmd = '''ssh -o BatchMode=yes -t %s "%s"''' % (node_ip, cmd)
-        run_cmd(ssh_cmd)
+        if host_dict['have_gtm_proxy']:
+            for node_dict in g_gtm_proxy:
+                if node_dict['ip'] == host_dict['ip']:
+                    pgdata = node_dict['pgdata']
+                    pidfile = '%s/gtm_proxy.pid' % pgdata
+                    node_status = get_pgx2_node_status(host_dict['ip'], 'gtm_proxy', pidfile)
+                    print format_str % (
+                        prt_hostname, prt_ip, 'gtm_proxy', node_dict['nodename'],
+                        node_dict['port'], node_status)
+                    prt_hostname = ''
+                    prt_ip = ''
 
-    cnt = len(g_coord)
-    for i in range(cnt):
-        nodename = g_coord[i]['nodename']
-        node_ip = g_coord[i]['ip']
-        os_user = g_coord[i]['os_user']
-        pgdata = g_coord[i]['pgdata']
+        if host_dict['have_coordinator']:
+            for node_dict in g_coord:
+                if node_dict['ip'] == host_dict['ip']:
+                    pgdata = node_dict['pgdata']
+                    pidfile = '%s/postmaster.pid' % pgdata
+                    node_status = get_pgx2_node_status(host_dict['ip'], 'postgres', pidfile)
+                    print format_str % (
+                        prt_hostname, prt_ip, 'coordinator', node_dict['nodename'],
+                        node_dict['port'], node_status)
+                    prt_hostname = ''
+                    prt_ip = ''
 
-        logger.info("Coordinator(%s) status ..." % nodename)
+        if host_dict['have_datanode']:
+            for node_dict in g_datanode:
+                if node_dict['ip'] == host_dict['ip']:
+                    pgdata = node_dict['pgdata']
+                    pidfile = '%s/postmaster.pid' % pgdata
+                    node_status = get_pgx2_node_status(host_dict['ip'], 'postgres', pidfile)
+                    print format_str % (
+                        prt_hostname, prt_ip, 'datanode', node_dict['nodename'],
+                        node_dict['port'], node_status)
+                    prt_hostname = ''
+                    prt_ip = ''
 
-        cmd = "su - %s -c 'pg_ctl status -Z coordinator -D %s'" % (os_user, pgdata)
-        ssh_cmd = '''ssh -o BatchMode=yes -t %s "%s"''' % (node_ip, cmd)
-        run_cmd(ssh_cmd)
+
+def list_pgx2():
+    """
+    显示各个节点的信息
+    :return:
+    """
+    global g_host_list
+
+    # 定义要打印的每一列的标题、长度及其对齐的方向
+    prt_item_list = [['hostname',           10, '-'],
+                     ['ip',                  9, ''],
+                     ['nodetype',           11, '-'],
+                     ['nodename',           12, '-'],
+                     ['port',                5, ''],
+                     ['os_user',            10, '-'],
+                     ['pgdata',             30, '-']]
+
+    title1 = '  '.join([i[0].center(i[1]) for i in prt_item_list])
+    title2 = '  '.join('-'*i[1] for i in prt_item_list)
+    format_str = '  '.join('%' + str(i[2]) + str(i[1]) + 's' for i in prt_item_list)
+    # 打印标题
+    print title1
+    print title2
+
+    for host_dict in g_host_list:
+        # print "===== %s(%s) =====" % (host_dict['hostname'], host_dict['ip'])
+        hostname = host_dict['hostname']
+        prt_hostname = hostname
+        ip = host_dict['ip']
+        prt_ip = ip
+        if host_dict['have_gtm']:
+            node_dict = g_gtm
+            pgdata = node_dict['pgdata']
+            print format_str % (
+                prt_hostname, prt_ip, 'gtm', node_dict['nodename'],
+                node_dict['port'], node_dict['os_user'], pgdata)
+            prt_hostname = ''
+            prt_ip = ''
+
+        if host_dict['have_gtm_standby']:
+            node_dict = g_gtm_standby
+            pgdata = node_dict['pgdata']
+            print format_str % (
+                prt_hostname, prt_ip, 'gtm_standby', node_dict['nodename'],
+                node_dict['port'], node_dict['os_user'], pgdata)
+            prt_hostname = ''
+            prt_ip = ''
+
+        if host_dict['have_gtm_proxy']:
+            for node_dict in g_gtm_proxy:
+                if node_dict['ip'] == host_dict['ip']:
+                    pgdata = node_dict['pgdata']
+                    print format_str % (
+                        prt_hostname, prt_ip, 'gtm_proxy', node_dict['nodename'],
+                        node_dict['port'], node_dict['os_user'], pgdata)
+                    prt_hostname = ''
+                    prt_ip = ''
+
+        if host_dict['have_coordinator']:
+            for node_dict in g_coord:
+                if node_dict['ip'] == host_dict['ip']:
+                    pgdata = node_dict['pgdata']
+                    print format_str % (
+                        prt_hostname, prt_ip, 'coordinator', node_dict['nodename'],
+                        node_dict['port'], node_dict['os_user'], pgdata)
+                    prt_hostname = ''
+                    prt_ip = ''
+
+        if host_dict['have_datanode']:
+            for node_dict in g_datanode:
+                if node_dict['ip'] == host_dict['ip']:
+                    pgdata = node_dict['pgdata']
+                    print format_str % (
+                        prt_hostname, prt_ip, 'datanode', node_dict['nodename'],
+                        node_dict['port'], node_dict['os_user'], pgdata)
+                    prt_hostname = ''
+                    prt_ip = ''
 
 
 def set_pgx2_node_conf(node_type, key, value):
@@ -1679,6 +1815,14 @@ def action_status():
     status_pgx2()
 
 
+def action_list():
+    parser = init_options_parser()
+    (options, args) = parser.parse_args(sys.argv[1:])
+
+    check_and_init_log(options.loglevel)
+    list_pgx2()
+
+
 def action_psql():
     parser = init_options_parser()
     parser.add_option("-d", "--datanode", action="store", dest="datanode", type='int', default=0,
@@ -1794,6 +1938,7 @@ def main():
         [action_start, 'start', 'start pgx2.'],
         [action_stop, 'stop', 'stop pgx2.'],
         [action_status, 'status', 'show status of pgx2.'],
+        [action_list, 'list', 'show node info of pgx2.'],
         [action_coord_reg_node, 'coord_reg_node', 'Register node to coordinator.'],
         [action_psql, 'psql', 'Using psql connect to coordinator or datanode.'],
         [action_set, 'set', 'Set database configuration in postgresql.conf'],
