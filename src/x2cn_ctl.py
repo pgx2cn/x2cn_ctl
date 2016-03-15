@@ -986,8 +986,8 @@ def initgtm_standby():
     port = g_gtm_standby['port']
     act_port = g_gtm['port']
     act_ip = g_gtm['ip']
-    pgdata = g_gtm['pgdata']
-
+    #pgdata = g_gtm['pgdata'] 
+    pgdata = g_gtm_standby['pgdata']
     # 如果PGDATA目录不存在，则建上
     cmd = "if [ ! -d '{pgdata:s}' ] ; then /bin/mkdir -p {pgdata:s};" \
           "/bin/chown {user:s}:{group:s} {pgdata:s};" \
